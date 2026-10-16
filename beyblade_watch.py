@@ -44,17 +44,19 @@ WATCHES = [
     {
         "name": "玩具反斗城 CX-20 改造套裝C",
         "type": "product",
+        "must": "Beyblade",
         "url": "https://www.toysrus.com.hk/zh-hk/10173908.html",
     },
     {
         "name": "玩具反斗城 BX-54 凱旋超神0-70LP",
         "type": "product",
+        "must": "Beyblade",
         "url": "https://www.toysrus.com.hk/zh-hk/10173909.html",
     },
 ]
 
 IN_STOCK_WORDS = ["加入購物車", "加入购物车", "Add to cart", "立即購買", "Buy now", "預訂", "預購"]
-OUT_WORDS = ["缺貨", "售罄", "已售完", "暫時無貨", "暫時缺貨", "Sold out", "Out of stock", "無貨"]
+OUT_WORDS = ["暫時缺貨", "缺貨", "售罄", "已售完", "暫時無貨", "Sold out", "Out of stock"]
 
 CHECK_EVERY = 300  # 秒 (--loop 模式)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_state.json")
@@ -69,11 +71,12 @@ def notify(msg: str):
         print("(未設定 TG_TOKEN / TG_CHAT_ID，只印出)")
         return
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data={"chat_id": chat, "text": msg},
             timeout=15,
         )
+        print("Telegram 回覆:", r.status_code, r.text[:200])
     except requests.RequestException as e:
         print("Telegram 發送失敗:", e)
 
@@ -110,6 +113,19 @@ def fetch_js(url):
     return html
 
 
+def fetch_js_text(url):
+    """用瀏覽器開頁面，只攞「真正睇到」嘅文字 (唔計隱藏元素)。"""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(url, wait_until="networkidle", timeout=45000)
+        page.wait_for_timeout(2000)
+        text = page.inner_text("body")
+        browser.close()
+    return text
+
+
 def norm(s):
     # 去走空格、底線、連字號，令 "BX-54" 同 "BX54" 都對得上
     return re.sub(r"[\s_\-]", "", s).upper()
@@ -126,14 +142,15 @@ def check_listing(w):
 
 
 def check_product(w):
-    if w["url"].startswith("PASTE_"):
-        return "skip", ""
-    html = fetch(w["url"])
-    has_in = any(k.lower() in html.lower() for k in IN_STOCK_WORDS)
-    has_out = any(k.lower() in html.lower() for k in OUT_WORDS)
-    if has_in and not has_out:
-        return "instock", f"🔔 {w['name']} 可能有貨!\n{w['url']}"
-    return "out", ""
+    text = fetch_js_text(w["url"])
+    # 頁面冇載入好 (例如被擋、錯誤頁) 就唔好亂報
+    if w.get("must") and w["must"].lower() not in text.lower():
+        return "error", ""
+    out = [k for k in OUT_WORDS if k.lower() in text.lower()]
+    print(f"   可見文字 {len(text)} 字；缺貨字眼: {out}")
+    if out:
+        return "out", ""
+    return "instock", f"🔔 {w['name']} 可以買!\n{w['url']}"
 
 
 def run_once():
@@ -145,6 +162,9 @@ def run_once():
             status, msg = fn(w)
         except Exception as e:  # 網站掛咗或改版，唔好令成個script死
             print(f"[{key}] 檢查失敗: {e}")
+            continue
+        if status == "error":
+            print(f"[{key}] 頁面內容唔似預期，跳過")
             continue
         prev = state.get(key)
         print(f"[{key}] {status}")
