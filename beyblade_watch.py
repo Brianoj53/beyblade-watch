@@ -61,6 +61,9 @@ OUT_WORDS = ["暫時缺貨", "缺貨", "售罄", "已售完", "暫時無貨", "S
 CHECK_EVERY = 300  # 秒 (--loop 模式)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_state.json")
 HEADERS = {"User-Agent": "Mozilla/5.0 (personal stock watcher)"}
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+BUY_WORDS = ["加入購物車", "加入购物车", "預訂", "立即購買", "Add to cart", "Pre-order"]
 # --------------------------------------
 
 
@@ -100,30 +103,50 @@ def fetch(url):
     return r.text
 
 
+def _new_page(p):
+    browser = p.chromium.launch()
+    ctx = browser.new_context(
+        user_agent=BROWSER_UA, locale="zh-HK", timezone_id="Asia/Hong_Kong",
+        viewport={"width": 1366, "height": 900},
+    )
+    return browser, ctx.new_page()
+
+
 def fetch_js(url):
     """用無頭瀏覽器開頁面，等 JavaScript 載入完先攞內容。"""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(user_agent=HEADERS["User-Agent"])
-        page.goto(url, wait_until="networkidle", timeout=45000)
-        page.wait_for_timeout(2000)  # 多等兩秒，確保商品列表載入
+        browser, page = _new_page(p)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(5000)
         html = page.content()
         browser.close()
     return html
 
 
 def fetch_js_text(url):
-    """用瀏覽器開頁面，只攞「真正睇到」嘅文字 (唔計隱藏元素)。"""
+    """用瀏覽器開頁面，回傳 (真正睇到嘅文字, 睇到嘅按鈕文字列表)。"""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(user_agent=HEADERS["User-Agent"])
-        page.goto(url, wait_until="networkidle", timeout=45000)
-        page.wait_for_timeout(2000)
+        browser, page = _new_page(p)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # 最多等 20 秒，等「缺貨」或購買按鈕嘅字眼出現
+        try:
+            page.wait_for_function(
+                "(ws) => ws.some(w => document.body.innerText.includes(w))",
+                arg=OUT_WORDS + BUY_WORDS, timeout=20000,
+            )
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
         text = page.inner_text("body")
+        buttons = page.eval_on_selector_all(
+            "button, input[type=button], input[type=submit]",
+            "els => els.filter(e => e.offsetParent !== null)"
+            ".map(e => (e.innerText || e.value || '').trim()).filter(Boolean)",
+        )
         browser.close()
-    return text
+    return text, buttons
 
 
 def norm(s):
@@ -142,15 +165,20 @@ def check_listing(w):
 
 
 def check_product(w):
-    text = fetch_js_text(w["url"])
-    # 頁面冇載入好 (例如被擋、錯誤頁) 就唔好亂報
+    text, buttons = fetch_js_text(w["url"])
     if w.get("must") and w["must"].lower() not in text.lower():
         return "error", ""
     out = [k for k in OUT_WORDS if k.lower() in text.lower()]
-    print(f"   可見文字 {len(text)} 字；缺貨字眼: {out}")
+    buy = [t for t in buttons if any(k.lower() in t.lower() for k in BUY_WORDS)]
+    print(f"   可見文字 {len(text)} 字；缺貨字眼: {out}；購買按鈕: {buy}")
     if out:
         return "out", ""
-    return "instock", f"🔔 {w['name']} 可以買!\n{w['url']}"
+    if buy:
+        return "instock", f"🔔 {w['name']} 可以買!\n{w['url']}"
+    # 又冇缺貨字眼、又見唔到購買按鈕 = 唔肯定，印出內容方便除錯，唔通知
+    print("   [除錯] 頁面文字開頭:", text[:400].replace("\n", " | "))
+    print("   [除錯] 所有按鈕:", buttons[:15])
+    return "unknown", ""
 
 
 def run_once():
@@ -163,8 +191,8 @@ def run_once():
         except Exception as e:  # 網站掛咗或改版，唔好令成個script死
             print(f"[{key}] 檢查失敗: {e}")
             continue
-        if status == "error":
-            print(f"[{key}] 頁面內容唔似預期，跳過")
+        if status in ("error", "unknown"):
+            print(f"[{key}] 判斷唔到 ({status})，今次跳過，唔通知")
             continue
         prev = state.get(key)
         print(f"[{key}] {status}")
