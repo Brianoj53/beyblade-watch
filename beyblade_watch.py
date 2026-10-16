@@ -67,12 +67,12 @@ BUY_WORDS = ["加入購物車", "加入购物车", "預訂", "立即購買", "Ad
 # --------------------------------------
 
 
-def notify(msg: str):
+def notify(msg: str) -> bool:
     token, chat = os.getenv("TG_TOKEN"), os.getenv("TG_CHAT_ID")
     print(msg)
     if not (token and chat):
         print("(未設定 TG_TOKEN / TG_CHAT_ID，只印出)")
-        return
+        return False
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
@@ -80,8 +80,10 @@ def notify(msg: str):
             timeout=15,
         )
         print("Telegram 回覆:", r.status_code, r.text[:200])
+        return r.ok
     except requests.RequestException as e:
         print("Telegram 發送失敗:", e)
+        return False
 
 
 def load_state():
@@ -130,11 +132,17 @@ def fetch_js_text(url):
     with sync_playwright() as p:
         browser, page = _new_page(p)
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        # 最多等 20 秒，等「缺貨」或購買按鈕嘅字眼出現
+        # 最多等 25 秒，等「缺貨」字眼或可見嘅購買按鈕出現 (價錢下面嗰格係慢啲先載入)
         try:
             page.wait_for_function(
-                "(ws) => ws.some(w => document.body.innerText.includes(w))",
-                arg=OUT_WORDS + BUY_WORDS, timeout=20000,
+                """(a) => {
+                    const t = document.body.innerText;
+                    if (a.out.some(w => t.includes(w))) return true;
+                    return [...document.querySelectorAll('button,input[type=button],input[type=submit]')]
+                        .some(e => e.offsetParent !== null &&
+                              a.buy.some(w => (e.innerText || e.value || '').includes(w)));
+                }""",
+                arg={"out": OUT_WORDS, "buy": BUY_WORDS}, timeout=25000,
             )
         except Exception:
             pass
@@ -183,6 +191,9 @@ def check_product(w):
 
 def run_once():
     state = load_state()
+    if not state.get("_tg_tested"):
+        if notify("✅ Beyblade 監察已啟動，Telegram 通知正常"):
+            state["_tg_tested"] = True
     for w in WATCHES:
         key = w["name"]
         try:
