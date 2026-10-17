@@ -59,6 +59,10 @@ IN_STOCK_WORDS = ["加入購物車", "加入购物车", "Add to cart", "立即�
 OUT_WORDS = ["暫時缺貨", "缺貨", "售罄", "已售完", "暫時無貨", "Sold out", "Out of stock"]
 
 CHECK_EVERY = 300  # 秒 (--loop 模式)
+
+# 每隔幾多分鐘，不論有貨冇貨，send 一次「全部貨況總結」畀你安心。
+# 設 10 = 每次檢查都 send (一日 144 條)；60 = 每小時；0 = 唔send總結。
+SUMMARY_EVERY_MIN = 60
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_state.json")
 HEADERS = {"User-Agent": "Mozilla/5.0 (personal stock watcher)"}
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -189,11 +193,25 @@ def check_product(w):
     return "unknown", ""
 
 
+def label(status):
+    if status == "out":
+        return "❌ 缺貨"
+    if status == "instock":
+        return "✅ 有貨/可買"
+    if status == "none":
+        return "➖ 未出現"
+    if status and status.startswith("found:"):
+        return "🔔 出現 " + status.split(":", 1)[1]
+    return "⚠️ 判斷唔到"
+
+
 def run_once():
     state = load_state()
     if not state.get("_tg_tested"):
         if notify("✅ Beyblade 監察已啟動，Telegram 通知正常"):
             state["_tg_tested"] = True
+
+    current = {}  # 今次每個網站嘅結果 (包括判斷唔到)
     for w in WATCHES:
         key = w["name"]
         try:
@@ -201,16 +219,29 @@ def run_once():
             status, msg = fn(w)
         except Exception as e:  # 網站掛咗或改版，唔好令成個script死
             print(f"[{key}] 檢查失敗: {e}")
+            current[key] = "unknown"
             continue
+        current[key] = status
         if status in ("error", "unknown"):
             print(f"[{key}] 判斷唔到 ({status})，今次跳過，唔通知")
             continue
         prev = state.get(key)
         print(f"[{key}] {status}")
-        # 只喺狀態「變成有貨/出現」嗰陣通知一次
-        if msg and status != prev:
-            notify(msg)
+        if status != prev:
+            if msg:  # 變成有貨 / 出現 -> 提示購買
+                notify(msg)
+            elif prev:  # 由有貨變返冇貨 -> 都通知你一聲
+                notify(f"ℹ️ {key}\n{label(prev)} → {label(status)}")
         state[key] = status
+
+    # 定時總結：有貨冇貨都 send，亦可以用嚟確認 script 仲行緊
+    if SUMMARY_EVERY_MIN > 0:
+        last = state.get("_last_summary", 0)
+        # 扣 4 分鐘容許 GitHub 排程有少少延遲
+        if time.time() - last >= SUMMARY_EVERY_MIN * 60 - 240:
+            lines = [f"{w['name']}: {label(current.get(w['name']))}" for w in WATCHES]
+            if notify("📋 貨況總結\n" + "\n".join(lines)):
+                state["_last_summary"] = time.time()
     save_state(state)
 
 
