@@ -62,7 +62,10 @@ CHECK_EVERY = 300  # 秒 (--loop 模式)
 
 # 每隔幾多分鐘，不論有貨冇貨，send 一次「全部貨況總結」畀你安心。
 # 設 10 = 每次檢查都 send (一日 144 條)；60 = 每小時；0 = 唔send總結。
-SUMMARY_EVERY_MIN = 60
+SUMMARY_EVERY_MIN = 0
+
+# True = 只有「有貨 / 出現」先通知；賣晒變返缺貨嘅提示唔send。
+ONLY_NOTIFY_WHEN_AVAILABLE = True
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_state.json")
 HEADERS = {"User-Agent": "Mozilla/5.0 (personal stock watcher)"}
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -230,7 +233,7 @@ def run_once():
         if status != prev:
             if msg:  # 變成有貨 / 出現 -> 提示購買
                 notify(msg)
-            elif prev:  # 由有貨變返冇貨 -> 都通知你一聲
+            elif prev and not ONLY_NOTIFY_WHEN_AVAILABLE:  # 由有貨變返冇貨 -> 都通知你一聲
                 notify(f"ℹ️ {key}\n{label(prev)} → {label(status)}")
         state[key] = status
 
